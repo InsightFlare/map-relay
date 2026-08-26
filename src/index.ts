@@ -5,6 +5,7 @@ const CLIENT_MARKER = "insightflare-backend-v1";
 const VERSION_HEADER = "x-insightflare-version";
 const COMMIT_HEADER = "x-insightflare-commit";
 const HOST_HEADER = "x-insightflare-host";
+const PROTOCOL_HEADER = "x-insightflare-protocol";
 
 const CARTO_STYLE_URLS = {
   light: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
@@ -104,6 +105,7 @@ type RequestMetadata = {
   version: string | null;
   commit: string | null;
   host: string | null;
+  protocol: "http" | "https";
   requestHost: string;
 };
 
@@ -141,6 +143,10 @@ function readRequestMetadata(request: Request): RequestMetadata {
     version: getBoundedHeader(request, VERSION_HEADER, 128),
     commit: getBoundedHeader(request, COMMIT_HEADER, 128),
     host: getBoundedHeader(request, HOST_HEADER, 255),
+    protocol:
+      getBoundedHeader(request, PROTOCOL_HEADER, 8) === "http"
+        ? "http"
+        : "https",
     requestHost: request.headers.get("host") || new URL(request.url).host,
   };
 }
@@ -160,6 +166,7 @@ function logRequest(
         [VERSION_HEADER]: metadata.version,
         [COMMIT_HEADER]: metadata.commit,
         [HOST_HEADER]: metadata.host,
+        [PROTOCOL_HEADER]: metadata.protocol,
         host: metadata.requestHost,
       },
       ...fields,
@@ -308,20 +315,48 @@ function asObject(value: unknown): JsonObject | null {
   return value as JsonObject;
 }
 
-function insightFlareStyleSourceUrl(): string {
-  return `${INSIGHTFLARE_MAP_RESOURCE_PREFIX}/v1/sources/carto.streets/v1/tiles.json`;
+function getInsightFlareOrigin(metadata: RequestMetadata): string | null {
+  if (!metadata.host) return null;
+
+  try {
+    const url = new URL(`${metadata.protocol}://${metadata.host}`);
+    if (url.pathname !== "/" || url.search || url.hash) return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
 }
 
-function insightFlareSpriteUrl(theme: Theme): string {
-  return `${INSIGHTFLARE_MAP_RESOURCE_PREFIX}/v1/sprites/${theme}/sprite`;
+function insightFlareResourceUrl(origin: string, path: string): string {
+  return `${origin}${path}`;
 }
 
-function insightFlareGlyphUrl(): string {
-  return `${INSIGHTFLARE_MAP_RESOURCE_PREFIX}/v1/fonts/{fontstack}/{range}.pbf`;
+function insightFlareStyleSourceUrl(origin: string): string {
+  return insightFlareResourceUrl(
+    origin,
+    `${INSIGHTFLARE_MAP_RESOURCE_PREFIX}/v1/sources/carto.streets/v1/tiles.json`,
+  );
 }
 
-function insightFlareTileUrl(): string {
-  return `${INSIGHTFLARE_MAP_RESOURCE_PREFIX}/v1/tiles/carto.streets/v1/{z}/{x}/{y}.mvt`;
+function insightFlareSpriteUrl(origin: string, theme: Theme): string {
+  return insightFlareResourceUrl(
+    origin,
+    `${INSIGHTFLARE_MAP_RESOURCE_PREFIX}/v1/sprites/${theme}/sprite`,
+  );
+}
+
+function insightFlareGlyphUrl(origin: string): string {
+  return insightFlareResourceUrl(
+    origin,
+    `${INSIGHTFLARE_MAP_RESOURCE_PREFIX}/v1/fonts/{fontstack}/{range}.pbf`,
+  );
+}
+
+function insightFlareTileUrl(origin: string): string {
+  return insightFlareResourceUrl(
+    origin,
+    `${INSIGHTFLARE_MAP_RESOURCE_PREFIX}/v1/tiles/carto.streets/v1/{z}/{x}/{y}.mvt`,
+  );
 }
 
 function applyDarkPaintOverrides(style: JsonObject): void {
@@ -341,7 +376,11 @@ function applyDarkPaintOverrides(style: JsonObject): void {
   }
 }
 
-function transformStyle(value: unknown, theme: Theme): JsonObject {
+function transformStyle(
+  value: unknown,
+  theme: Theme,
+  insightFlareOrigin: string,
+): JsonObject {
   const style = asObject(value);
   if (!style) throw new Error("invalid_style_json");
 
@@ -349,23 +388,26 @@ function transformStyle(value: unknown, theme: Theme): JsonObject {
   const cartoSource = sources ? asObject(sources.carto) : null;
   if (cartoSource) {
     if (typeof cartoSource.url === "string") {
-      cartoSource.url = insightFlareStyleSourceUrl();
+      cartoSource.url = insightFlareStyleSourceUrl(insightFlareOrigin);
     }
     if (Array.isArray(cartoSource.tiles)) {
-      cartoSource.tiles = [insightFlareTileUrl()];
+      cartoSource.tiles = [insightFlareTileUrl(insightFlareOrigin)];
     }
   }
 
-  style.sprite = insightFlareSpriteUrl(theme);
-  style.glyphs = insightFlareGlyphUrl();
+  style.sprite = insightFlareSpriteUrl(insightFlareOrigin, theme);
+  style.glyphs = insightFlareGlyphUrl(insightFlareOrigin);
   if (theme === "dark") applyDarkPaintOverrides(style);
   return style;
 }
 
-function transformTileJson(value: unknown): JsonObject {
+function transformTileJson(
+  value: unknown,
+  insightFlareOrigin: string,
+): JsonObject {
   const tileJson = asObject(value);
   if (!tileJson) throw new Error("invalid_tile_json");
-  tileJson.tiles = [insightFlareTileUrl()];
+  tileJson.tiles = [insightFlareTileUrl(insightFlareOrigin)];
   return tileJson;
 }
 
@@ -481,6 +523,15 @@ async function handleMapRequest(
   const pathname = url.pathname;
   const resource = classifyResource(pathname);
   const key = getCARTOKey(env);
+  const insightFlareOrigin = getInsightFlareOrigin(metadata);
+
+  if (!insightFlareOrigin) {
+    return jsonError(
+      400,
+      "invalid_insightflare_host",
+      "A valid InsightFlare host is required.",
+    );
+  }
 
   if (!key) {
     return jsonError(
@@ -505,7 +556,7 @@ async function handleMapRequest(
       );
     }
     const response = await transformedJsonResponse(upstream, profile, (value) =>
-      transformStyle(value, theme),
+      transformStyle(value, theme, insightFlareOrigin),
     );
     logRequest(request, metadata, {
       resource,
@@ -526,10 +577,8 @@ async function handleMapRequest(
         "CARTO tile metadata is unavailable.",
       );
     }
-    const response = await transformedJsonResponse(
-      upstream,
-      profile,
-      transformTileJson,
+    const response = await transformedJsonResponse(upstream, profile, (value) =>
+      transformTileJson(value, insightFlareOrigin),
     );
     logRequest(request, metadata, {
       resource,
