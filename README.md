@@ -24,6 +24,7 @@ X-InsightFlare-Version: <InsightFlare version>
 X-InsightFlare-Commit: <commit hash>
 X-InsightFlare-Host: <instance host>
 X-InsightFlare-Protocol: <http|https>
+X-InsightFlare-Locale: <en|zh|ja> (optional)
 ```
 
 Worker 会将这些值以结构化 JSON 写入 Workers Logs。它们不会进入 CDN 缓存键，也不会转发给 CARTO。
@@ -38,6 +39,13 @@ GET /v1/tiles/carto.streets/v1/{z}/{x}/{y}.mvt
 GET /v1/fonts/{fontstack}/{range}.pbf
 GET /v1/sprites/{light|dark}/sprite[\u00402x].{json|png}
 ```
+
+Style requests may include `?if_locale=en|zh|ja`. The Worker rewrites the
+`text-field` expression for CARTO name-bearing layers to prefer the matching
+localized field (`name:zh-Hans` for simplified Chinese) and falls back to
+`name:zh`, `name_en`, `name_int`, and `name`.
+The locale is part of the style URL cache key. Vector tiles themselves are
+unchanged because they already contain the available localized name fields.
 
 Style JSON 和 TileJSON 会由本 Worker 转换成带有实例 origin 的绝对 InsightFlare `/api/public/resources/map/...` 路径，使浏览器后续请求仍然经过 InsightFlare 后端，不需要解析 CARTO JSON。这里使用绝对 URL，因为 MapLibre 会相对于页面 URL 解析样式中的资源地址。
 

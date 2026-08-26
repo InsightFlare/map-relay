@@ -6,6 +6,8 @@ const VERSION_HEADER = "x-insightflare-version";
 const COMMIT_HEADER = "x-insightflare-commit";
 const HOST_HEADER = "x-insightflare-host";
 const PROTOCOL_HEADER = "x-insightflare-protocol";
+const LOCALE_HEADER = "x-insightflare-locale";
+const LOCALE_QUERY_PARAM = "if_locale";
 
 const CARTO_STYLE_URLS = {
   light: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
@@ -42,6 +44,7 @@ const DARK_PAINT_OVERRIDES = [
 const MAX_JSON_BYTES = 4 * 1024 * 1024;
 
 type Theme = keyof typeof CARTO_STYLE_URLS;
+type MapLocale = "en" | "zh" | "ja";
 type JsonObject = Record<string, unknown>;
 
 type CacheProfile = {
@@ -106,6 +109,7 @@ type RequestMetadata = {
   commit: string | null;
   host: string | null;
   protocol: "http" | "https";
+  locale: MapLocale | null;
   requestHost: string;
 };
 
@@ -137,6 +141,10 @@ function getBoundedHeader(
   return value;
 }
 
+function parseLocale(value: string | null | undefined): MapLocale | null {
+  return value === "en" || value === "zh" || value === "ja" ? value : null;
+}
+
 function readRequestMetadata(request: Request): RequestMetadata {
   return {
     client: getBoundedHeader(request, CLIENT_HEADER, 64),
@@ -147,6 +155,7 @@ function readRequestMetadata(request: Request): RequestMetadata {
       getBoundedHeader(request, PROTOCOL_HEADER, 8) === "http"
         ? "http"
         : "https",
+    locale: parseLocale(getBoundedHeader(request, LOCALE_HEADER, 8)),
     requestHost: request.headers.get("host") || new URL(request.url).host,
   };
 }
@@ -167,6 +176,7 @@ function logRequest(
         [COMMIT_HEADER]: metadata.commit,
         [HOST_HEADER]: metadata.host,
         [PROTOCOL_HEADER]: metadata.protocol,
+        [LOCALE_HEADER]: metadata.locale,
         host: metadata.requestHost,
       },
       ...fields,
@@ -359,11 +369,59 @@ function insightFlareTileUrl(origin: string): string {
   );
 }
 
-function applyDarkPaintOverrides(style: JsonObject): void {
+function localizedNameExpression(locale: MapLocale): unknown[] {
+  const localizedFields =
+    locale === "zh"
+      ? ["name:zh-Hans", "name:zh"]
+      : [locale === "en" ? "name_en" : `name:${locale}`];
+  return [
+    "coalesce",
+    ...localizedFields.map((field) => ["get", field]),
+    ["get", "name_en"],
+    ["get", "name_int"],
+    ["get", "name"],
+  ];
+}
+
+function applyLocalizedTextFields(style: JsonObject, locale: MapLocale): void {
   const layers = style.layers;
   if (!Array.isArray(layers)) return;
 
-  for (const [layerId, property, color] of DARK_PAINT_OVERRIDES) {
+  const localizableSourceLayers = new Set([
+    "waterway",
+    "water_name",
+    "place",
+    "poi",
+    "transportation_name",
+  ]);
+  const textField = localizedNameExpression(locale);
+
+  for (const candidate of layers) {
+    const layer = asObject(candidate);
+    const sourceLayer = layer?.["source-layer"];
+    if (!layer || typeof sourceLayer !== "string") continue;
+    if (!localizableSourceLayers.has(sourceLayer)) continue;
+
+    const layout = asObject(layer.layout);
+    if (!layout || !Object.prototype.hasOwnProperty.call(layout, "text-field")) {
+      continue;
+    }
+
+    layout["text-field"] = textField;
+    layer.layout = layout;
+  }
+}
+
+function applyPaintOverrides(
+  style: JsonObject,
+  theme: Theme,
+): void {
+  const layers = style.layers;
+  if (!Array.isArray(layers)) return;
+
+  const overrides = theme === "dark" ? DARK_PAINT_OVERRIDES : [];
+
+  for (const [layerId, property, color] of overrides) {
     const layer = layers.find((candidate) => {
       const object = asObject(candidate);
       return object?.id === layerId;
@@ -379,6 +437,7 @@ function applyDarkPaintOverrides(style: JsonObject): void {
 function transformStyle(
   value: unknown,
   theme: Theme,
+  locale: MapLocale,
   insightFlareOrigin: string,
 ): JsonObject {
   const style = asObject(value);
@@ -397,7 +456,8 @@ function transformStyle(
 
   style.sprite = insightFlareSpriteUrl(insightFlareOrigin, theme);
   style.glyphs = insightFlareGlyphUrl(insightFlareOrigin);
-  if (theme === "dark") applyDarkPaintOverrides(style);
+  applyLocalizedTextFields(style, locale);
+  applyPaintOverrides(style, theme);
   return style;
 }
 
@@ -524,6 +584,7 @@ async function handleMapRequest(
   const resource = classifyResource(pathname);
   const key = getCARTOKey(env);
   const insightFlareOrigin = getInsightFlareOrigin(metadata);
+  const locale = parseLocale(url.searchParams.get(LOCALE_QUERY_PARAM)) ?? "en";
 
   if (!insightFlareOrigin) {
     return jsonError(
@@ -556,11 +617,12 @@ async function handleMapRequest(
       );
     }
     const response = await transformedJsonResponse(upstream, profile, (value) =>
-      transformStyle(value, theme, insightFlareOrigin),
+      transformStyle(value, theme, locale, insightFlareOrigin),
     );
     logRequest(request, metadata, {
       resource,
       theme,
+      locale,
       status: response.status,
       upstreamCache: upstream.headers.get("cf-cache-status"),
     });
