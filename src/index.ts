@@ -1,4 +1,5 @@
 const SERVICE_VERSION = "v1";
+const INSIGHTFLARE_MAP_RESOURCE_PREFIX = "/api/public/resources/map";
 const CLIENT_HEADER = "x-insightflare-client";
 const CLIENT_MARKER = "insightflare-backend-v1";
 const VERSION_HEADER = "x-insightflare-version";
@@ -307,20 +308,20 @@ function asObject(value: unknown): JsonObject | null {
   return value as JsonObject;
 }
 
-function relativeStyleSourceUrl(): string {
-  return "../../sources/carto.streets/v1/tiles.json";
+function insightFlareStyleSourceUrl(): string {
+  return `${INSIGHTFLARE_MAP_RESOURCE_PREFIX}/v1/sources/carto.streets/v1/tiles.json`;
 }
 
-function relativeSpriteUrl(theme: Theme): string {
-  return `../../sprites/${theme}/sprite`;
+function insightFlareSpriteUrl(theme: Theme): string {
+  return `${INSIGHTFLARE_MAP_RESOURCE_PREFIX}/v1/sprites/${theme}/sprite`;
 }
 
-function relativeGlyphUrl(): string {
-  return "../../fonts/{fontstack}/{range}.pbf";
+function insightFlareGlyphUrl(): string {
+  return `${INSIGHTFLARE_MAP_RESOURCE_PREFIX}/v1/fonts/{fontstack}/{range}.pbf`;
 }
 
-function relativeTileUrl(): string {
-  return "../../../tiles/carto.streets/v1/{z}/{x}/{y}.mvt";
+function insightFlareTileUrl(): string {
+  return `${INSIGHTFLARE_MAP_RESOURCE_PREFIX}/v1/tiles/carto.streets/v1/{z}/{x}/{y}.mvt`;
 }
 
 function applyDarkPaintOverrides(style: JsonObject): void {
@@ -348,15 +349,15 @@ function transformStyle(value: unknown, theme: Theme): JsonObject {
   const cartoSource = sources ? asObject(sources.carto) : null;
   if (cartoSource) {
     if (typeof cartoSource.url === "string") {
-      cartoSource.url = relativeStyleSourceUrl();
+      cartoSource.url = insightFlareStyleSourceUrl();
     }
     if (Array.isArray(cartoSource.tiles)) {
-      cartoSource.tiles = [relativeTileUrl()];
+      cartoSource.tiles = [insightFlareTileUrl()];
     }
   }
 
-  style.sprite = relativeSpriteUrl(theme);
-  style.glyphs = relativeGlyphUrl();
+  style.sprite = insightFlareSpriteUrl(theme);
+  style.glyphs = insightFlareGlyphUrl();
   if (theme === "dark") applyDarkPaintOverrides(style);
   return style;
 }
@@ -364,7 +365,7 @@ function transformStyle(value: unknown, theme: Theme): JsonObject {
 function transformTileJson(value: unknown): JsonObject {
   const tileJson = asObject(value);
   if (!tileJson) throw new Error("invalid_tile_json");
-  tileJson.tiles = [relativeTileUrl()];
+  tileJson.tiles = [insightFlareTileUrl()];
   return tileJson;
 }
 

@@ -38,7 +38,7 @@ GET /v1/fonts/{fontstack}/{range}.pbf
 GET /v1/sprites/{light|dark}/sprite[\u00402x].{json|png}
 ```
 
-Style JSON 和 TileJSON 会由本 Worker 转换成相对路径，使 InsightFlare 后端能够直接镜像同样的路径结构，不需要解析 CARTO JSON。
+Style JSON 和 TileJSON 会由本 Worker 转换成 InsightFlare 的同源 `/api/public/resources/map/...` 路径，使浏览器后续请求仍然经过 InsightFlare 后端，不需要解析 CARTO JSON。这里使用绝对路径，因为 MapLibre 会相对于页面 URL 解析样式中的资源地址。
 
 ## 缓存
 
