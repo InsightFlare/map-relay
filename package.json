@@ -5,6 +5,7 @@
   "scripts": {
     "check": "wrangler check",
     "typecheck": "wrangler types && tsc --noEmit",
+    "test": "node --experimental-strip-types --test src/index.test.mjs",
     "deploy": "wrangler deploy"
   },
   "devDependencies": {

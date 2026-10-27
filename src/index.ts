@@ -44,7 +44,7 @@ const DARK_PAINT_OVERRIDES = [
 const MAX_JSON_BYTES = 4 * 1024 * 1024;
 
 type Theme = keyof typeof CARTO_STYLE_URLS;
-type MapLocale = "en" | "zh" | "ja";
+type MapLocale = "en" | "zh" | "zh-tw" | "ja";
 type JsonObject = Record<string, unknown>;
 
 type CacheProfile = {
@@ -142,7 +142,9 @@ function getBoundedHeader(
 }
 
 function parseLocale(value: string | null | undefined): MapLocale | null {
-  return value === "en" || value === "zh" || value === "ja" ? value : null;
+  return value === "en" || value === "zh" || value === "zh-tw" || value === "ja"
+    ? value
+    : null;
 }
 
 function readRequestMetadata(request: Request): RequestMetadata {
@@ -369,46 +371,41 @@ function insightFlareTileUrl(origin: string): string {
   );
 }
 
-function localizedNameExpression(locale: MapLocale): unknown[] {
+function localizedNameExpression(
+  locale: MapLocale,
+  originalField: unknown,
+): unknown {
+  if (locale === "en") return originalField;
   const localizedFields =
     locale === "zh"
-      ? ["name:zh-Hans", "name:zh"]
-      : [locale === "en" ? "name_en" : `name:${locale}`];
+      ? ["name:zh-Hans", "name:zh", "name_zh"]
+      : locale === "zh-tw"
+        ? ["name:zh-Hant", "name:zh-Hant-TW", "name:zh", "name:zh-Hans"]
+        : ["name:ja", "name_ja"];
+
   return [
     "coalesce",
     ...localizedFields.map((field) => ["get", field]),
-    ["get", "name_en"],
-    ["get", "name_int"],
-    ["get", "name"],
+    originalField,
   ];
 }
 
 function applyLocalizedTextFields(style: JsonObject, locale: MapLocale): void {
   const layers = style.layers;
-  if (!Array.isArray(layers)) return;
-
-  const localizableSourceLayers = new Set([
-    "waterway",
-    "water_name",
-    "place",
-    "poi",
-    "transportation_name",
-  ]);
-  const textField = localizedNameExpression(locale);
+  if (!Array.isArray(layers) || locale === "en") return;
 
   for (const candidate of layers) {
     const layer = asObject(candidate);
     const sourceLayer = layer?.["source-layer"];
     if (!layer || typeof sourceLayer !== "string") continue;
-    if (!localizableSourceLayers.has(sourceLayer)) continue;
-
+    // House numbers are identifiers rather than localized names.
+    if (sourceLayer === "buildings") continue;
     const layout = asObject(layer.layout);
     if (!layout || !Object.prototype.hasOwnProperty.call(layout, "text-field")) {
       continue;
     }
-
-    layout["text-field"] = textField;
-    layer.layout = layout;
+    // Preserve any zoom-dependent upstream text expression as a fallback.
+    layout["text-field"] = localizedNameExpression(locale, layout["text-field"]);
   }
 }
 
@@ -444,13 +441,42 @@ function transformStyle(
   if (!style) throw new Error("invalid_style_json");
 
   const sources = asObject(style.sources);
-  const cartoSource = sources ? asObject(sources.carto) : null;
-  if (cartoSource) {
-    if (typeof cartoSource.url === "string") {
-      cartoSource.url = insightFlareStyleSourceUrl(insightFlareOrigin);
+  const vectorSources = Object.values(sources ?? {})
+    .map(asObject)
+    .filter((source): source is JsonObject => source?.type === "vector");
+  if (vectorSources.length === 0) throw new Error("no_vector_sources");
+
+  for (const source of vectorSources) {
+    if (typeof source.url === "string") {
+      const url = new URL(source.url);
+      if (!url.hostname.endsWith(".cartocdn.com")) {
+        throw new Error("unknown_vector_source");
+      }
+      source.url = insightFlareStyleSourceUrl(insightFlareOrigin);
     }
-    if (Array.isArray(cartoSource.tiles)) {
-      cartoSource.tiles = [insightFlareTileUrl(insightFlareOrigin)];
+    if (Array.isArray(source.tiles)) {
+      source.tiles = source.tiles.map((tile) => {
+        if (typeof tile !== "string") throw new Error("unknown_tile_url");
+        const url = new URL(tile);
+        if (
+          url.hostname !== "tiles.basemaps.cartocdn.com" &&
+          !CARTO_MVT_HOSTS.includes(url.hostname as (typeof CARTO_MVT_HOSTS)[number])
+        ) {
+          throw new Error("unknown_tile_host");
+        }
+        const tilePath = decodeURIComponent(url.pathname);
+        const v2 = /^\/v\/(\d{8}-\d{2})\/vectortiles\/carto\.streets\/v2\/\{z\}\/\{x\}\/\{y\}\.mvt$/.exec(tilePath);
+        if (v2) {
+          return insightFlareResourceUrl(
+            insightFlareOrigin,
+            INSIGHTFLARE_MAP_RESOURCE_PREFIX +
+              "/v1/tiles/carto.streets/v2/" + v2[1] + "/{z}/{x}/{y}.mvt",
+          );
+        }
+        const v1 = /^\/vectortiles\/carto\.streets\/v1\/\{z\}\/\{x\}\/\{y\}\.mvt$/.test(tilePath);
+        if (v1) return insightFlareTileUrl(insightFlareOrigin);
+        throw new Error("unknown_tile_template");
+      });
     }
   }
 
@@ -549,7 +575,7 @@ function classifyResource(pathname: string): string {
   if (pathname === "/v1/sources/carto.streets/v1/tiles.json") {
     return "tilejson";
   }
-  if (/^\/v1\/tiles\/carto\.streets\/v1\/\d+\/\d+\/\d+\.mvt$/.test(pathname)) {
+  if (/^\/v1\/tiles\/carto\.streets\/(?:v1\/\d+|v2\/\d{8}-\d{2}\/\d+)\/\d+\/\d+\.mvt$/.test(pathname)) {
     return "vector_tile";
   }
   if (/^\/v1\/fonts\/[^/]+\/[^/]+\.pbf$/.test(pathname)) return "font";
@@ -651,13 +677,14 @@ async function handleMapRequest(
   }
 
   if (resource === "vector_tile") {
-    const match =
-      /^\/v1\/tiles\/carto\.streets\/v1\/(\d+)\/(\d+)\/(\d+)\.mvt$/.exec(
-        pathname,
-      );
-    if (!match) return jsonError(404, "not_found", "Map resource not found.");
+    const matchV1 =
+      /^\/v1\/tiles\/carto\.streets\/v1\/(\d+)\/(\d+)\/(\d+)\.mvt$/.exec(pathname);
+    const matchV2 =
+      /^\/v1\/tiles\/carto\.streets\/v2\/(\d{8}-\d{2})\/(\d+)\/(\d+)\/(\d+)\.mvt$/.exec(pathname);
+    if (!matchV1 && !matchV2)
+      return jsonError(404, "not_found", "Map resource not found.");
 
-    const [, z, x, y] = match;
+    const [, z, x, y] = matchV2 ? matchV2.slice(1) : (matchV1 as RegExpExecArray);
     const zoom = Number(z);
     const tileX = Number(x);
     const tileY = Number(y);
@@ -681,7 +708,13 @@ async function handleMapRequest(
     }
 
     const normalizedX = ((tileX % max) + max) % max;
-    const rawUrls = getTileUrls(z, String(normalizedX), y);
+    const rawUrls = matchV2
+      ? [
+          "https://tiles.basemaps.cartocdn.com/v/" +
+            matchV2[1] + "/vectortiles/carto.streets/v2/" +
+            z + "/" + normalizedX + "/" + y + ".mvt",
+        ]
+      : getTileUrls(z, String(normalizedX), y);
     const result = await fetchCARTOWithFallback(
       rawUrls,
       key,
@@ -788,6 +821,7 @@ function healthResponse(env: MapRelayEnv): Response {
         "/v1/styles/{light|dark}/style.json",
         "/v1/sources/carto.streets/v1/tiles.json",
         "/v1/tiles/carto.streets/v1/{z}/{x}/{y}.mvt",
+        "/v1/tiles/carto.streets/v2/{version}/{z}/{x}/{y}.mvt",
         "/v1/fonts/{fontstack}/{range}.pbf",
         "/v1/sprites/{light|dark}/sprite[\u00402x].{json|png}",
       ],
