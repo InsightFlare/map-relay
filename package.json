@@ -9,8 +9,9 @@
     "deploy": "wrangler deploy"
   },
   "devDependencies": {
+    "@maplibre/maplibre-gl-style-spec": "24.10.0",
     "@types/node": "^25.0.0",
     "typescript": "^5.9.3",
-    "wrangler": "^4.123.0"
+    "wrangler": "^4.155.0"
   }
 }

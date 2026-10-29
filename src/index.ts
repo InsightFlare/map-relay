@@ -383,11 +383,29 @@ function localizedNameExpression(
         ? ["name:zh-Hant", "name:zh-Hant-TW", "name:zh", "name:zh-Hans"]
         : ["name:ja", "name_ja"];
 
-  return [
+  const fallback = (field: unknown): unknown => [
     "coalesce",
-    ...localizedFields.map((field) => ["get", field]),
-    originalField,
+    ...localizedFields.map((name) => ["get", name]),
+    field,
   ];
+
+  // MapLibre requires ["zoom"] as an input to a top-level
+  // step/interpolate expression. Wrap each output branch instead.
+  if (
+    Array.isArray(originalField) &&
+    (originalField[0] === "step" || originalField[0] === "interpolate") &&
+    Array.isArray(originalField[originalField[0] === "step" ? 1 : 2]) &&
+    originalField[originalField[0] === "step" ? 1 : 2][0] === "zoom"
+  ) {
+    const firstOutput = originalField[0] === "step" ? 2 : 4;
+    return originalField.map((part, index) =>
+      index >= firstOutput && (index - firstOutput) % 2 === 0
+        ? fallback(part)
+        : part,
+    );
+  }
+
+  return fallback(originalField);
 }
 
 function applyLocalizedTextFields(style: JsonObject, locale: MapLocale): void {
@@ -404,7 +422,7 @@ function applyLocalizedTextFields(style: JsonObject, locale: MapLocale): void {
     if (!layout || !Object.prototype.hasOwnProperty.call(layout, "text-field")) {
       continue;
     }
-    // Preserve any zoom-dependent upstream text expression as a fallback.
+    // Localize branch outputs without nesting upstream zoom expressions.
     layout["text-field"] = localizedNameExpression(locale, layout["text-field"]);
   }
 }

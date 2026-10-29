@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
+import { validateStyleMin } from "@maplibre/maplibre-gl-style-spec";
 
 import mapRelay from "./index.ts";
 
@@ -31,6 +32,21 @@ const style = {
     layer("road", "roads"),
     layer("poi", "pois"),
     layer("housenumber", "buildings"),
+    {
+      id: "place_city_zoom",
+      type: "symbol",
+      source: "protomaps",
+      "source-layer": "places",
+      layout: {
+        "text-field": [
+          "step",
+          ["zoom"],
+          ["coalesce", ["get", "name:en"], ["get", "name"]],
+          13,
+          ["get", "name"],
+        ],
+      },
+    },
   ],
 };
 const env = { CARTO_BASEMAP_KEY: "test-placeholder" };
@@ -94,4 +110,36 @@ test("modern proxied tiles are served with bounded coordinates", async () => {
     env,
   );
   assert.equal(invalid.status, 400);
+});
+
+test("preserves zoom-based label expressions and validates every localized map style", async () => {
+  for (const theme of ["light", "dark"]) {
+    for (const locale of ["en", "zh", "zh-tw", "ja"]) {
+      globalThis.fetch = async () => new Response(JSON.stringify(style));
+      const response = await mapRelay.fetch(
+        request("/v1/styles/" + theme + "/style.json?if_locale=" + locale, locale),
+        env,
+      );
+      assert.equal(response.status, 200);
+      const localized = await response.json();
+      const expression = localized.layers[5].layout["text-field"];
+
+      // A zoom expression is legal only inside a top-level step/interpolate.
+      assert.equal(expression[0], "step", theme + "/" + locale);
+      assert.deepEqual(expression[1], ["zoom"]);
+      assert.equal(expression[3], 13);
+      if (locale === "en") {
+        assert.deepEqual(expression[2], style.layers[5].layout["text-field"][2]);
+        assert.deepEqual(expression[4], style.layers[5].layout["text-field"][4]);
+      } else {
+        assert.equal(expression[2][0], "coalesce");
+        assert.equal(expression[4][0], "coalesce");
+        assert.deepEqual(expression[2].at(-1), style.layers[5].layout["text-field"][2]);
+        assert.deepEqual(expression[4].at(-1), style.layers[5].layout["text-field"][4]);
+      }
+
+      const errors = validateStyleMin(localized).map((error) => error.message);
+      assert.deepEqual(errors, [], theme + "/" + locale + " MapLibre style validation");
+    }
+  }
 });
